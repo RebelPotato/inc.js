@@ -13,79 +13,96 @@ const Bilinear = (fn, arg0, arg1, group) => ({
 });
 const Feedback = (arg) => ({ type: "feedback", arg }); // feedback with a single delay
 
-function run(ops, group, state, dispatch) {
-  const result = Array(ops.length);
-  for (let i = 0; i < ops.length; i++) {
-    const op = ops[i];
-    if (dispatch[op.type]) dispatch[op.type](i, op, group, state, result);
-    else {
-      throw new Error(`Unknown operation type: ${op.type}`);
-    }
-  }
-  return result;
-}
 const init_dispatch = {
-  input(i, op, group, state) {
-    group[i] = op.group;
+  input(i, ctx) {
+    ctx.group[i] = ctx.ops[i].group;
   },
-  linear(i, op, group, state) {
-    group[i] = op.group;
+  linear(i, ctx) {
+    ctx.group[i] = ctx.ops[i].group;
   },
-  delay(i, op, group, state) {
-    group[i] = group[op.arg];
-    state[i] = group[i].zero();
+  delay(i, ctx) {
+    ctx.group[i] = ctx.group[ctx.ops[i].arg];
+    ctx.state[i] = ctx.group[i].zero();
   },
-  sum(i, op, group, state) {
-    group[i] = group[op.args[0]];
-    for (const arg of op.args)
-      if (group[arg] !== group[i]) {
+  sum(i, ctx) {
+    ctx.group[i] = ctx.group[ctx.ops[i].args[0]];
+    for (const arg of ctx.ops[i].args)
+      if (ctx.group[arg] !== ctx.group[i]) {
         throw new Error(
-          `Sum operation ${i} has inconsistent groups: ${group[i]} vs ${group[arg]}`
+          `Sum operation ${i} has inconsistent groups: ${ctx.group[i]} vs ${ctx.group[arg]}`
         );
       }
-    state[i] = group[i].zero();
+    ctx.state[i] = ctx.group[i].zero();
   },
-  integral(i, op, group, state) {
-    group[i] = group[op.arg];
-    state[i] = group[i].zero();
+  integral(i, ctx) {
+    ctx.group[i] = ctx.group[ctx.ops[i].arg];
+    ctx.state[i] = ctx.group[i].zero();
   },
-  bilinear(i, op, group, state) {
-    group[i] = op.group;
+  bilinear(i, ctx) {
+    ctx.group[i] = ctx.ops[i].group;
   },
-  feedback(i, op, group, state) {
-    group[i] = group[op.arg];
+  feedback(i, ctx) {
+    ctx.group[i] = ctx.group[ctx.ops[i].arg];
   },
 };
-const init = (ops, group, state) => run(ops, group, state, init_dispatch);
 
 const step_dispatch = {
-  input(i, op, group, state, result) {
-    result[i] = op.value;
+  input(i, ctx) {
+    ctx.result[i] = ctx.ops[i].value;
   },
-  linear(i, op, group, state, result) {
-    result[i] = op.fn(result[op.arg]);
+  linear(i, ctx) {
+    const x = ctx.result[ctx.ops[i].arg];
+    ctx.result[i] = ctx.ops[i].fn(x);
   },
-  delay(i, op, group, state, result) {
-    result[i] = state[i];
-    state[i] = result[op.arg];
+  delay(i, ctx) {
+    ctx.result[i] = ctx.state[i];
+    ctx.state[i] = ctx.result[ctx.ops[i].arg];
   },
-  sum(i, op, group, state, result) {
-    result[i] = group[i].zero();
-    for (const arg of op.args) result[i] = group[i].add(result[i], result[arg]);
+  sum(i, ctx) {
+    ctx.result[i] = ctx.group[i].zero();
+    for (const arg of ctx.ops[i].args)
+      ctx.result[i] = ctx.group[i].add(ctx.result[i], ctx.result[arg]);
   },
-  integral(i, op, group, state, result) {
-    state[i] = group[i].add(state[i], result[op.arg]);
-    result[i] = state[i];
+  integral(i, ctx) {
+    ctx.state[i] = ctx.group[i].add(ctx.state[i], ctx.result[ctx.ops[i].arg]);
+    ctx.result[i] = ctx.state[i];
   },
-  bilinear(i, op, group, state, result) {
-    result[i] = op.fn(result[op.arg0], result[op.arg1]);
+  bilinear(i, ctx) {
+    ctx.result[i] = ctx.ops[i].fn(
+      ctx.result[ctx.ops[i].arg0],
+      ctx.result[ctx.ops[i].arg1]
+    );
   },
-  feedback(i, op, group, state, result) {
-    result[i] = result[op.arg];
-    state[op.arg] = result[i];
+  feedback(i, ctx) {
+    ctx.result[i] = ctx.result[ctx.ops[i].arg];
+    state[ctx.ops[i].arg] = ctx.result[i];
   },
 };
-const step = (ops, group, state) => run(ops, group, state, step_dispatch);
+class RunCtx {
+  constructor(ops) {
+    this.ops = ops;
+    this.group = Array(ops.length);
+    this.state = [];
+    for (let i = 0; i < ops.length; i++) {
+      const op = this.ops[i];
+      if (init_dispatch[op.type]) init_dispatch[op.type](i, this);
+      else {
+        throw new Error(`Unknown operation type: ${op.type}`);
+      }
+    }
+  }
+  next() {
+    this.result = Array(this.ops.length);
+    for (let i = 0; i < this.ops.length; i++) {
+      const op = this.ops[i];
+      if (step_dispatch[op.type]) step_dispatch[op.type](i, this);
+      else {
+        throw new Error(`Unknown operation type: ${op.type}`);
+      }
+    }
+    return this.result;
+  }
+}
 
 const delta_dispatch = {
   input(op, mapping, new_ops) {
@@ -153,22 +170,20 @@ function test() {
     Linear((x) => x * 2, 1, num_group),
     Bilinear((x, y) => x * y, 2, 3, num_group),
   ];
-  const state = [];
-  const group = [];
   console.log("ops", ops);
-  init(ops, group, state);
+  const t = new RunCtx(ops);
   for (let i = 0; i < 10; i++) {
-    const x = step(ops, group, state);
+    const x = t.next();
     console.log(x[x.length - 1]);
   }
 
   const deltaed = delta(ops);
   console.log("deltaed", deltaed);
-  init(deltaed, group, state);
+  const dt = new RunCtx(deltaed);
   for (let i = 0; i < 10; i++) {
-    const x = step(deltaed, group, state);
+    const x = dt.next();
     console.log(x[x.length - 1]);
-    if (i === 0) deltaed[0].value = 0;
+    if (i === 0) dt.ops[0].value = 0;
   }
 }
 test();
