@@ -178,6 +178,7 @@ function test() {
   }
 
   const deltaed = delta(ops);
+  deltaed.push(Integral(deltaed.length - 1));
   console.log("deltaed", deltaed);
   const dt = new RunCtx(deltaed);
   for (let i = 0; i < 10; i++) {
